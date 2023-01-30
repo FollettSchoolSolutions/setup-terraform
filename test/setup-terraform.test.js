@@ -34,6 +34,7 @@ describe('Setup Terraform', () => {
   beforeEach(() => {
     process.env.HOME = '/tmp/asdf';
     process.env.APPDATA = '/tmp/asdf';
+    core.getBooleanInput = jest.fn().mockReturnValue(false);
   });
 
   afterEach(async () => {

@@ -1,0 +1,45 @@
+# tools installed via asdf https://asdf-vm.com/
+
+# https://github.com/hashicorp/terraform/blob/main/CHANGELOG.md
+# as of 2025-03-26
+#terraform 1.12.2   # DO NOT USE 1.10.0, it has a bug with terragrunt
+
+# https://github.com/gruntwork-io/terragrunt/releases
+# as of 2025-03-26
+# terragrunt 0.82.0
+
+# https://github.com/terraform-docs/terraform-docs/
+# as of 2025-03-26
+# terraform-docs 0.19.0
+
+# https://github.com/terraform-linters/tflint
+# as of 2025-03-26
+# tflint 0.55.1
+
+# https://github.com/aquasecurity/tfsec
+# as of 2025-03-26
+# tfsec 1.28.13
+
+# https://github.com/pre-commit/pre-commit
+# as of 2025-03-26
+#pre-commit 4.2.0
+
+# https://github.com/helm/helm/releases
+# as of 2025-03-26
+# helm 3.17.2
+
+# https://nodejs.org/download/release
+# https://nodejs.org/en/about/previous-releases
+nodejs 24.12.0
+
+# command line tool for communicating with a Kubernetes cluster's control plane, using the Kubernetes API.
+# version should be plus/minus 1 minor version of the cluster
+# https://github.com/kubernetes/kubernetes/tree/master/cmd/kubectl
+#kubectl 1.30.9
+
+# [Azure/kubelogin: A Kubernetes credential (exec) plugin implementing Azure authentication](https://github.com/Azure/kubelogin)
+# as of 2025-03-20
+#kubelogin 0.2.6
+
+# yq 3.4.1
+#yq v4.9.6

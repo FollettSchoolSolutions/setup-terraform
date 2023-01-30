@@ -11,7 +11,7 @@ The `hashicorp/setup-terraform` action is a JavaScript action that sets up Terra
 
 After you've used the action, subsequent steps in the same job can run arbitrary Terraform commands using [the GitHub Actions `run` syntax](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsrun). This allows most Terraform commands to work exactly like they do on your local command line.
 
-## Usage
+## Usage 
 
 This action can be run on `ubuntu-latest`, `windows-latest`, and `macos-latest` GitHub Actions runners. When running on `windows-latest` the shell should be set to Bash. When running on self-hosted GitHub Actions runners, NodeJS must be previously installed with the version specified in the [`action.yml`](https://github.com/hashicorp/setup-terraform/blob/main/action.yml).
 
@@ -254,6 +254,62 @@ The action supports the following inputs:
 - `terraform_wrapper` - (optional) Whether to install a wrapper to wrap subsequent calls of
    the `terraform` binary and expose its STDOUT, STDERR, and exit code as outputs
    named `stdout`, `stderr`, and `exitcode` respectively. Defaults to `true`.
+- `fail_on_detected_diff` (optional) Using `-detailed-exitcode` CLI option returns exit code 0 no change or 2 for a detected change.
+  Normally these are accepted as success. If doing specific handling (failing on drift, for example), this option 
+  will fail when exit code 2 is returned. Defaults to false.
+
+### DRIFT DETECTION
+
+#### TERRAFORM 
+
+Terraform supports the `-detailed-exitcode` option that returns detailed exit codes when the command exits. This
+will change the meaning of exit codes to:
+
+0 - Succeeded, diff is empty (no changes)
+1 - Errored
+2 - Succeeded, there is a diff
+
+#### DRIFT DETECTION SUPPORT 
+
+We run Terraform workflows in GitHub Actions to detect resource drift. Currently, you can either use the default return
+value (0 or else causes a failure) or use the `-extended-return` option to return error code 2 when the plan detects a
+difference but no other errors.
+
+Previously the code saw exit code 2 and accepted that as a successful run. We want to see that OPTIONALLY as a
+failure (or warning if GHA ever supports a warning outcome).
+
+This uses a new input:
+
+    fail_on_detected_diff:
+        default: false
+        required: false
+
+Previous code:
+
+| terraform plan    | -extended-return | exit code | workflow result |
+|-------------------|------------------|-----------|-----------------|
+| no changes        | no               | 0         | Green / Success |
+| resources changed | no               | 0         | Green/Success   |
+| error             | no               | >3        | Red / Fail      |
+| no changes        | yes              | 0         | Green / Success |
+| resources changed | yes              | 2         | Green/Success   |
+| error             | yes              | >3        | Red / Fail      |
+
+Updated code:
+
+| terraform plan    | -extended-return | fail_on_detected_diff | exit code | workflow result |
+|-------------------|------------------|-----------------------|-----------|-----------------|
+| no changes        | no               | false                 | 0         | Green / Success |
+| resources changed | no               | false                 | 0         | Green/Success   |
+| error             | no               | false                 | >3        | Red / Fail      |
+| no changes        | yes              | false                 | 0         | Green / Success |
+| resources changed | yes              | false                 | 2         | Green/Success   |
+| error             | yes              | false                 | >3        | Red / Fail      |
+| no changes        | X                | true                  | 0         | Green / Success |
+| resources changed | X                | true                  | 2         | Red / Fail      |
+| error             | X                | true                  | >3        | Red / Fail      |
+
+If/when a "warning" outcome is supported in GitHub Actions, we should change the behavior to return a warning instead of a failure.
 
 ## Outputs
 
