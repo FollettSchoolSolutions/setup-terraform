@@ -54,5 +54,4 @@ jobs:
         if: always() # even if previous step failed, we want to capture the exit code
         shell: bash
         run: | 
-          # echo "${{ steps.plan_fail.outputs.stdout }}"
           echo "exit_code=${{ steps.plan_fail.outputs.exitcode }}"
