@@ -36,16 +36,13 @@ jobs:
         shell: bash
         run: | 
           terraform plan
-          exit_code=$?
-          echo "exit_code=$exit_code"
-          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
 
       - name: Print Terraform Plan 1 Output
         if: always() # even if previous step failed, we want to capture the exit code
         shell: bash
         run: |
           echo "${{ steps.plan.outputs.stdout }}"
-          echo "exit_code=${{ steps.plan.outputs.exit_code }}"
+          echo "exit_code=${{ steps.plan.outputs.exitcode }}"
 
       - name: Terraform Plan (fail)
         if: always() # even if previous step failed, we want to capture the exit code
@@ -53,13 +50,10 @@ jobs:
         shell: bash
         run: | 
           terraform plan -detailed-exitcode
-          exit_code=$?
-          echo "exit_code=$exit_code"
-          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
 
       - name: Print Terraform Plan 2 Output
         if: always() # even if previous step failed, we want to capture the exit code
         shell: bash
         run: | 
           echo "${{ steps.plan_fail.outputs.stdout }}"
-          echo "exit_code=${{ steps.plan_fail.outputs.exit_code }}"
+          echo "exit_code=${{ steps.plan_fail.outputs.exitcode }}"
