@@ -16,7 +16,7 @@ jobs:
         working-directory: ./.github/workflows/data/local
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Terraform
         uses: ./
@@ -34,12 +34,20 @@ jobs:
       - name: Terraform Plan
         id: plan
         shell: bash
-        run: terraform plan
+        run: | 
+          terraform plan
+          exit_code=$?
+          echo "exit_code=$exit_code"
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
 
       - name: Terraform Plan (fail)
         id: plan_fail
         shell: bash
-        run: terraform plan -detailed-exitcode
+        run: | 
+          terraform plan -detailed-exitcode
+          exit_code=$?
+          echo "exit_code=$exit_code"
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
 #
 #      - name: Print Terraform Plan
 #        shell: bash
