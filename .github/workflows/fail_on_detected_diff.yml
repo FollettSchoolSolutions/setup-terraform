@@ -5,8 +5,7 @@ on: # rebuild any PRs and main branch changes
   push:
     branches:
       - main
-      - develop
-      - fss_main
+      - detect_diff
 jobs:
 
   exitcode:
