@@ -5548,62 +5548,17 @@ class MemoryCacheStore extends EventEmitter {
 }
 
 function findEntry (key, entries, now) {
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i]
-    if (
-      entry.deleteAt > now &&
-      entry.method === key.method &&
-      varyMatches(key, entry)
-    ) {
-      return entry
-    }
-  }
-}
-
-function varyMatches (key, entry) {
-  if (entry.vary == null) {
-    return true
-  }
-
-  for (const headerName in entry.vary) {
-    if (Object.hasOwn(entry.vary, headerName) && !headerValueEquals(key.headers?.[headerName], entry.vary[headerName])) {
-      return false
-    }
-  }
-
-  return true
-}
-
-/**
- * @param {string|string[]|null|undefined} lhs
- * @param {string|string[]|null|undefined} rhs
- * @returns {boolean}
- */
-function headerValueEquals (lhs, rhs) {
-  if (lhs == null && rhs == null) {
-    return true
-  }
-
-  if ((lhs == null && rhs != null) ||
-      (lhs != null && rhs == null)) {
-    return false
-  }
-
-  if (Array.isArray(lhs) && Array.isArray(rhs)) {
-    if (lhs.length !== rhs.length) {
-      return false
-    }
-
-    for (let i = 0; i < lhs.length; i++) {
-      if (lhs[i] !== rhs[i]) {
-        return false
+  return entries.find((entry) => (
+    entry.deleteAt > now &&
+    entry.method === key.method &&
+    (entry.vary == null || Object.keys(entry.vary).every(headerName => {
+      if (entry.vary[headerName] === null) {
+        return key.headers[headerName] === undefined
       }
-    }
 
-    return true
-  }
-
-  return lhs === rhs
+      return entry.vary[headerName] === key.headers[headerName]
+    }))
+  ))
 }
 
 module.exports = MemoryCacheStore
@@ -6071,13 +6026,7 @@ function headerValueEquals (lhs, rhs) {
       return false
     }
 
-    for (let i = 0; i < lhs.length; i++) {
-      if (lhs[i] !== rhs[i]) {
-        return false
-      }
-    }
-
-    return true
+    return lhs.every((x, i) => x === rhs[i])
   }
 
   return lhs === rhs
@@ -7514,13 +7463,7 @@ function processHeader (request, key, val) {
       } else if (typeof val[i] === 'object') {
         throw new InvalidArgumentError(`invalid ${key} header`)
       } else {
-        // Coerce primitives (and reject unsafe coercions such as functions
-        // with a crafted toString/Symbol.toPrimitive).
-        const str = `${val[i]}`
-        if (!isValidHeaderValue(str)) {
-          throw new InvalidArgumentError(`invalid ${key} header`)
-        }
-        arr.push(str)
+        arr.push(`${val[i]}`)
       }
     }
     val = arr
@@ -7531,12 +7474,7 @@ function processHeader (request, key, val) {
   } else if (val === null) {
     val = ''
   } else {
-    // Coerce primitives (and reject unsafe coercions such as functions
-    // with a crafted toString/Symbol.toPrimitive).
     val = `${val}`
-    if (!isValidHeaderValue(val)) {
-      throw new InvalidArgumentError(`invalid ${key} header`)
-    }
   }
 
   if (headerName === 'host') {
@@ -9900,7 +9838,6 @@ const {
   RequestContentLengthMismatchError,
   ResponseContentLengthMismatchError,
   RequestAbortedError,
-  InvalidArgumentError,
   HeadersTimeoutError,
   HeadersOverflowError,
   SocketError,
@@ -11025,16 +10962,8 @@ function writeH1 (client, request) {
     }
     body = bodyStream.stream
     contentLength = bodyStream.length
-  } else if (util.isBlobLike(body) && request.contentType == null) {
-    const contentType = body.type
-    if (contentType) {
-      const contentTypeValue = `${contentType}`
-      if (!util.isValidHeaderValue(contentTypeValue)) {
-        util.errorRequest(client, request, new InvalidArgumentError('invalid content-type header'))
-        return false
-      }
-      headers.push('content-type', contentTypeValue)
-    }
+  } else if (util.isBlobLike(body) && request.contentType == null && body.type) {
+    headers.push('content-type', body.type)
   }
 
   if (body && typeof body.read === 'function') {
@@ -15150,10 +15079,7 @@ module.exports = {
 const util = __nccwpck_require__(3440)
 const {
   parseCacheControlHeader,
-  hasInvalidCacheControlDirective,
   parseVaryHeader,
-  hasVaryStar,
-  isInvalidOrWildcardVaryHeader,
   isEtagUsable
 } = __nccwpck_require__(7659)
 const { parseHttpDate } = __nccwpck_require__(5453)
@@ -15175,92 +15101,6 @@ const NOT_UNDERSTOOD_STATUS_CODES = [
 ]
 
 const MAX_RESPONSE_AGE = 2147483647000
-
-function trimOWS (value) {
-  return value.replace(/^[\t ]+|[\t ]+$/g, '')
-}
-
-function arrayIncludes (array, value) {
-  for (let i = 0; i < array.length; i++) {
-    if (array[i] === value) {
-      return true
-    }
-  }
-
-  return false
-}
-
-function appendConnectionHeaderTokens (headersToRemove, connectionHeader) {
-  const values = Array.isArray(connectionHeader) ? connectionHeader : [connectionHeader]
-
-  for (let i = 0; i < values.length; i++) {
-    const tokens = values[i].split(',')
-    for (let j = 0; j < tokens.length; j++) {
-      headersToRemove.push(trimOWS(tokens[j]).toLowerCase())
-    }
-  }
-}
-
-function getSameOriginPath (cacheKey, location) {
-  if (typeof location !== 'string') {
-    return undefined
-  }
-
-  let originUrl
-  let requestUrl
-  let locationUrl
-  try {
-    originUrl = new URL(cacheKey.origin)
-    requestUrl = new URL(cacheKey.path, originUrl)
-    locationUrl = new URL(location, requestUrl)
-  } catch {
-    return undefined
-  }
-
-  if (locationUrl.origin !== originUrl.origin) {
-    return undefined
-  }
-
-  return locationUrl.pathname + locationUrl.search
-}
-
-function deleteCachedUri (store, cacheKey, path) {
-  deleteCachedValue(store, {
-    ...cacheKey,
-    path
-  })
-
-  for (let i = 0; i < util.safeHTTPMethods.length; i++) {
-    const method = util.safeHTTPMethods[i]
-    if (method !== cacheKey.method) {
-      deleteCachedValue(store, {
-        ...cacheKey,
-        method,
-        path
-      })
-    }
-  }
-}
-
-function deleteLocationTargets (store, cacheKey, headerValue) {
-  if (headerValue === undefined) {
-    return
-  }
-
-  const values = Array.isArray(headerValue) ? headerValue : [headerValue]
-  for (let i = 0; i < values.length; i++) {
-    const path = getSameOriginPath(cacheKey, values[i])
-    if (path !== undefined) {
-      deleteCachedUri(store, cacheKey, path)
-    }
-  }
-}
-
-function invalidateUnsafeRequest (store, cacheKey, resHeaders) {
-  deleteCachedUri(store, cacheKey, cacheKey.path)
-  deleteLocationTargets(store, cacheKey, resHeaders.location)
-  deleteLocationTargets(store, cacheKey, resHeaders['content-location'])
-}
 
 /**
  * @typedef {import('../../types/dispatcher.d.ts').default.DispatchHandler} DispatchHandler
@@ -15343,28 +15183,28 @@ class CacheHandler {
     const handler = this
 
     if (
-      !arrayIncludes(util.safeHTTPMethods, this.#cacheKey.method) &&
+      !util.safeHTTPMethods.includes(this.#cacheKey.method) &&
       statusCode >= 200 &&
       statusCode <= 399
     ) {
       // Successful response to an unsafe method, delete it from cache
       //  https://www.rfc-editor.org/rfc/rfc9111.html#name-invalidating-stored-response
-      invalidateUnsafeRequest(this.#store, this.#cacheKey, resHeaders)
+      try {
+        this.#store.delete(this.#cacheKey)?.catch?.(noop)
+      } catch {
+        // Fail silently
+      }
       return downstreamOnHeaders()
     }
 
     const cacheControlHeader = resHeaders['cache-control']
-    const heuristicallyCacheable = resHeaders['last-modified'] && arrayIncludes(HEURISTICALLY_CACHEABLE_STATUS_CODES, statusCode)
+    const heuristicallyCacheable = resHeaders['last-modified'] && HEURISTICALLY_CACHEABLE_STATUS_CODES.includes(statusCode)
     if (
       !cacheControlHeader &&
       !resHeaders['expires'] &&
       !heuristicallyCacheable &&
       !this.#cacheByDefault
     ) {
-      if (statusCode === 304 && resHeaders.vary && isInvalidOrWildcardVaryHeader(resHeaders.vary)) {
-        deleteCachedValue(this.#store, this.#cacheKey)
-      }
-
       // Don't have anything to tell us this response is cachable and we're not
       //  caching by default
       return downstreamOnHeaders()
@@ -15372,46 +15212,31 @@ class CacheHandler {
 
     const cacheControlDirectives = cacheControlHeader ? parseCacheControlHeader(cacheControlHeader) : {}
     if (!canCacheResponse(this.#cacheType, statusCode, resHeaders, cacheControlDirectives, this.#cacheKey.headers)) {
-      if (statusCode === 304 && (cacheControlHeader || revalidationResponseDisallowsCachedReuse(this.#cacheType, resHeaders, cacheControlDirectives))) {
-        deleteCachedValue(this.#store, this.#cacheKey)
-      }
-
       return downstreamOnHeaders()
     }
 
     const now = Date.now()
-    const resAge = Object.hasOwn(resHeaders, 'age') ? getAge(resHeaders.age) : undefined
-    if (resAge !== undefined && resAge >= MAX_RESPONSE_AGE) {
+    const resAge = resHeaders.age ? getAge(resHeaders.age) : undefined
+    if (resAge && resAge >= MAX_RESPONSE_AGE) {
       // Response considered stale
-      deleteCachedValueIfNotModified(statusCode, this.#store, this.#cacheKey)
       return downstreamOnHeaders()
     }
 
-    const resDate = Object.hasOwn(resHeaders, 'date') ? getDate(resHeaders.date) : undefined
-    if (resDate === null) {
-      deleteCachedValueIfNotModified(statusCode, this.#store, this.#cacheKey)
-      return downstreamOnHeaders()
-    }
-
-    const apparentAge = resDate ? Math.max(0, now - resDate.getTime()) : 0
-    const currentAge = Math.max(apparentAge, resAge ?? 0)
+    const resDate = typeof resHeaders.date === 'string'
+      ? parseHttpDate(resHeaders.date)
+      : undefined
 
     const staleAt =
       determineStaleAt(this.#cacheType, now, resAge, resHeaders, resDate, cacheControlDirectives) ??
       this.#cacheByDefault
-    if (staleAt === undefined || currentAge >= staleAt) {
-      if (cacheControlHeader || staleAt !== undefined) {
-        deleteCachedValueIfNotModified(statusCode, this.#store, this.#cacheKey)
-      }
-
+    if (staleAt === undefined || (resAge && resAge > staleAt)) {
       return downstreamOnHeaders()
     }
 
-    const baseTime = now - currentAge
+    const baseTime = resDate ? resDate.getTime() : now
     const absoluteStaleAt = staleAt + baseTime
     if (now >= absoluteStaleAt) {
       // Response is already stale
-      deleteCachedValueIfNotModified(statusCode, this.#store, this.#cacheKey)
       return downstreamOnHeaders()
     }
 
@@ -15424,8 +15249,7 @@ class CacheHandler {
       }
     }
 
-    const cachedAt = baseTime
-    const deleteAt = determineDeleteAt(baseTime, now, cacheControlDirectives, absoluteStaleAt)
+    const deleteAt = determineDeleteAt(baseTime, cacheControlDirectives, absoluteStaleAt)
     const strippedHeaders = stripNecessaryHeaders(resHeaders, cacheControlDirectives)
 
     /**
@@ -15437,7 +15261,7 @@ class CacheHandler {
       headers: strippedHeaders,
       vary: varyDirectives,
       cacheControlDirectives,
-      cachedAt,
+      cachedAt: resAge ? now - resAge : now,
       staleAt: absoluteStaleAt,
       deleteAt
     }
@@ -15455,7 +15279,6 @@ class CacheHandler {
         value.statusCode = cachedValue.statusCode
         value.statusMessage = cachedValue.statusMessage
         value.etag = cachedValue.etag
-        value.vary = varyDirectives ?? cachedValue.vary
         value.headers = { ...cachedValue.headers, ...strippedHeaders }
 
         downstreamOnHeaders()
@@ -15587,36 +15410,6 @@ class CacheHandler {
 }
 
 /**
- * @param {import('../../types/cache-interceptor.d.ts').default.CacheStore} store
- * @param {import('../../types/cache-interceptor.d.ts').default.CacheKey} cacheKey
- */
-function deleteCachedValue (store, cacheKey) {
-  try {
-    store.delete(cacheKey)?.catch?.(noop)
-  } catch {
-    // Fail silently
-  }
-}
-
-function deleteCachedValueIfNotModified (statusCode, store, cacheKey) {
-  if (statusCode === 304) {
-    deleteCachedValue(store, cacheKey)
-  }
-}
-
-/**
- * @param {import('../../types/cache-interceptor.d.ts').default.CacheOptions['type']} cacheType
- * @param {import('../../types/header.d.ts').IncomingHttpHeaders} resHeaders
- * @param {import('../../types/cache-interceptor.d.ts').default.CacheControlDirectives} cacheControlDirectives
- * @returns {boolean}
- */
-function revalidationResponseDisallowsCachedReuse (cacheType, resHeaders, cacheControlDirectives) {
-  return cacheControlDirectives['no-store'] === true ||
-    (cacheType === 'shared' && cacheControlDirectives.private === true) ||
-    (resHeaders.vary ? isInvalidOrWildcardVaryHeader(resHeaders.vary) : false)
-}
-
-/**
  * @see https://www.rfc-editor.org/rfc/rfc9111.html#name-storing-responses-to-authen
  *
  * @param {import('../../types/cache-interceptor.d.ts').default.CacheOptions['type']} cacheType
@@ -15627,12 +15420,12 @@ function revalidationResponseDisallowsCachedReuse (cacheType, resHeaders, cacheC
  */
 function canCacheResponse (cacheType, statusCode, resHeaders, cacheControlDirectives, reqHeaders) {
   // Status code must be final and understood.
-  if (statusCode < 200 || arrayIncludes(NOT_UNDERSTOOD_STATUS_CODES, statusCode)) {
+  if (statusCode < 200 || NOT_UNDERSTOOD_STATUS_CODES.includes(statusCode)) {
     return false
   }
   // Responses with neither status codes that are heuristically cacheable, nor "explicit enough" caching
   // directives, are not cacheable. "Explicit enough": see https://www.rfc-editor.org/rfc/rfc9111.html#section-3
-  if (!arrayIncludes(HEURISTICALLY_CACHEABLE_STATUS_CODES, statusCode) && !resHeaders['expires'] &&
+  if (!HEURISTICALLY_CACHEABLE_STATUS_CODES.includes(statusCode) && !resHeaders['expires'] &&
     !cacheControlDirectives.public &&
     cacheControlDirectives['max-age'] === undefined &&
     // RFC 9111: a private response directive, if the cache is not shared
@@ -15651,12 +15444,12 @@ function canCacheResponse (cacheType, statusCode, resHeaders, cacheControlDirect
   }
 
   // https://www.rfc-editor.org/rfc/rfc9111.html#section-4.1-5
-  if (resHeaders.vary && hasVaryStar(resHeaders.vary)) {
+  if (resHeaders.vary?.includes('*')) {
     return false
   }
 
   // https://www.rfc-editor.org/rfc/rfc9111.html#name-storing-responses-to-authen
-  if (reqHeaders != null && Object.hasOwn(reqHeaders, 'authorization')) {
+  if (reqHeaders?.authorization) {
     if (
       !cacheControlDirectives.public &&
       !cacheControlDirectives['s-maxage'] &&
@@ -15671,14 +15464,14 @@ function canCacheResponse (cacheType, statusCode, resHeaders, cacheControlDirect
 
     if (
       Array.isArray(cacheControlDirectives['no-cache']) &&
-      arrayIncludes(cacheControlDirectives['no-cache'], 'authorization')
+      cacheControlDirectives['no-cache'].includes('authorization')
     ) {
       return false
     }
 
     if (
       Array.isArray(cacheControlDirectives['private']) &&
-      arrayIncludes(cacheControlDirectives['private'], 'authorization')
+      cacheControlDirectives['private'].includes('authorization')
     ) {
       return false
     }
@@ -15688,50 +15481,13 @@ function canCacheResponse (cacheType, statusCode, resHeaders, cacheControlDirect
 }
 
 /**
- * @param {string | string[]} dateHeader
- * @returns {Date | null | undefined}
- */
-function getDate (dateHeader) {
-  let dateValue = dateHeader
-  if (Array.isArray(dateValue)) {
-    if (dateValue.length !== 1) {
-      return null
-    }
-
-    dateValue = dateValue[0]
-  }
-
-  if (typeof dateValue !== 'string') {
-    return null
-  }
-
-  return parseHttpDate(dateValue)
-}
-
-/**
  * @param {string | string[]} ageHeader
  * @returns {number | undefined}
  */
 function getAge (ageHeader) {
-  let ageValue = ageHeader
-  if (Array.isArray(ageValue)) {
-    if (ageValue.length !== 1) {
-      return MAX_RESPONSE_AGE
-    }
+  const age = parseInt(Array.isArray(ageHeader) ? ageHeader[0] : ageHeader)
 
-    ageValue = ageValue[0]
-  }
-
-  if (typeof ageValue !== 'string' || !/^[\t ]*[0-9]+[\t ]*$/.test(ageValue)) {
-    return MAX_RESPONSE_AGE
-  }
-
-  const age = BigInt(ageValue.replace(/^[\t ]+|[\t ]+$/g, ''))
-  if (age >= BigInt(MAX_RESPONSE_AGE / 1000)) {
-    return MAX_RESPONSE_AGE
-  }
-
-  return Number(age) * 1000
+  return isNaN(age) ? undefined : age * 1000
 }
 
 /**
@@ -15749,60 +15505,43 @@ function determineStaleAt (cacheType, now, age, resHeaders, responseDate, cacheC
     // Prioritize s-maxage since we're a shared cache
     //  s-maxage > max-age > Expire
     //  https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.10-3
-    if (hasInvalidCacheControlDirective(cacheControlDirectives, 's-maxage')) {
-      return 0
-    }
-
     const sMaxAge = cacheControlDirectives['s-maxage']
     if (sMaxAge !== undefined) {
-      return sMaxAge * 1000
+      return sMaxAge > 0 ? sMaxAge * 1000 : undefined
     }
-  }
-
-  if (hasInvalidCacheControlDirective(cacheControlDirectives, 'max-age')) {
-    return 0
   }
 
   const maxAge = cacheControlDirectives['max-age']
   if (maxAge !== undefined) {
-    return maxAge * 1000
+    return maxAge > 0 ? maxAge * 1000 : undefined
   }
 
-  if (Object.hasOwn(resHeaders, 'expires')) {
+  if (typeof resHeaders.expires === 'string') {
     // https://www.rfc-editor.org/rfc/rfc9111.html#section-5.3
-    if (typeof resHeaders.expires !== 'string') {
-      return 0
-    }
-
     const expiresDate = parseHttpDate(resHeaders.expires)
-    if (!expiresDate) {
-      return 0
-    }
-
-    if (now >= expiresDate.getTime()) {
-      return 0
-    }
-
-    if (responseDate) {
-      if (responseDate >= expiresDate) {
-        return 0
+    if (expiresDate) {
+      if (now >= expiresDate.getTime()) {
+        return undefined
       }
 
-      const freshnessLifetime = expiresDate.getTime() - responseDate.getTime()
-      if (age !== undefined && age >= freshnessLifetime) {
-        return 0
+      if (responseDate) {
+        if (responseDate >= expiresDate) {
+          return undefined
+        }
+
+        if (age !== undefined && age > (expiresDate - responseDate)) {
+          return undefined
+        }
       }
 
-      return freshnessLifetime
+      return expiresDate.getTime() - now
     }
-
-    return expiresDate.getTime() - now
   }
 
   if (typeof resHeaders['last-modified'] === 'string') {
     // https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-heuristic-fresh
-    const lastModified = parseHttpDate(resHeaders['last-modified'])
-    if (lastModified) {
+    const lastModified = new Date(resHeaders['last-modified'])
+    if (isValidDate(lastModified)) {
       if (lastModified.getTime() >= now) {
         return undefined
       }
@@ -15815,19 +15554,18 @@ function determineStaleAt (cacheType, now, age, resHeaders, responseDate, cacheC
 
   if (cacheControlDirectives.immutable) {
     // https://www.rfc-editor.org/rfc/rfc8246.html#section-2.2
-    return 31536000000
+    return 31536000
   }
 
   return undefined
 }
 
 /**
- * @param {number} baseTime
- * @param {number} cachedAt
+ * @param {number} now
  * @param {import('../../types/cache-interceptor.d.ts').default.CacheControlDirectives} cacheControlDirectives
  * @param {number} staleAt
  */
-function determineDeleteAt (baseTime, cachedAt, cacheControlDirectives, staleAt) {
+function determineDeleteAt (now, cacheControlDirectives, staleAt) {
   let staleWhileRevalidate = -Infinity
   let staleIfError = -Infinity
   let immutable = -Infinity
@@ -15841,21 +15579,15 @@ function determineDeleteAt (baseTime, cachedAt, cacheControlDirectives, staleAt)
   }
 
   if (cacheControlDirectives.immutable && staleWhileRevalidate === -Infinity && staleIfError === -Infinity) {
-    immutable = cachedAt + 31536000000
+    immutable = now + 31536000000
   }
 
   // When no stale directives or immutable flag, add a revalidation buffer
   // equal to the freshness lifetime so the entry survives past staleAt long
   // enough to be revalidated instead of silently disappearing.
-  //
-  // Response Date headers only have second precision, so baseTime can trail the
-  // actual cache insertion time by up to ~1s. Pad the buffer by that bounded
-  // skew so short-lived entries do not disappear exactly when they should be
-  // revalidated.
   if (staleWhileRevalidate === -Infinity && staleIfError === -Infinity && immutable === -Infinity) {
-    const freshnessLifetime = staleAt - baseTime
-    const datePrecisionPadding = Math.min(Math.max(cachedAt - baseTime, 0), 1000)
-    return staleAt + freshnessLifetime + datePrecisionPadding
+    const freshnessLifetime = staleAt - now
+    return staleAt + freshnessLifetime
   }
 
   return Math.max(staleAt, staleWhileRevalidate, staleIfError, immutable)
@@ -15882,7 +15614,14 @@ function stripNecessaryHeaders (resHeaders, cacheControlDirectives) {
   ]
 
   if (resHeaders['connection']) {
-    appendConnectionHeaderTokens(headersToRemove, resHeaders['connection'])
+    if (Array.isArray(resHeaders['connection'])) {
+      // connection: a
+      // connection: b
+      headersToRemove.push(...resHeaders['connection'].map(header => header.trim()))
+    } else {
+      // connection: a, b
+      headersToRemove.push(...resHeaders['connection'].split(',').map(header => header.trim()))
+    }
   }
 
   if (Array.isArray(cacheControlDirectives['no-cache'])) {
@@ -15895,13 +15634,21 @@ function stripNecessaryHeaders (resHeaders, cacheControlDirectives) {
 
   let strippedHeaders
   for (const headerName of headersToRemove) {
-    if (Object.hasOwn(resHeaders, headerName)) {
+    if (resHeaders[headerName]) {
       strippedHeaders ??= { ...resHeaders }
       delete strippedHeaders[headerName]
     }
   }
 
   return strippedHeaders ?? resHeaders
+}
+
+/**
+ * @param {Date} date
+ * @returns {boolean}
+ */
+function isValidDate (date) {
+  return date instanceof Date && Number.isFinite(date.valueOf())
 }
 
 module.exports = CacheHandler
@@ -15934,7 +15681,7 @@ class CacheRevalidationHandler {
   #successful = false
 
   /**
-   * @type {((success: boolean, context?: any, statusCode?: number, headers?: import('../../types/header.d.ts').IncomingHttpHeaders) => void) | null}
+   * @type {((boolean, any) => void) | null}
    */
   #callback
 
@@ -15951,7 +15698,7 @@ class CacheRevalidationHandler {
   #allowErrorStatusCodes
 
   /**
-   * @param {(success: boolean, context?: any, statusCode?: number, headers?: import('../../types/header.d.ts').IncomingHttpHeaders) => void} callback Function to call if the cached value is valid
+   * @param {(boolean) => void} callback Function to call if the cached value is valid
    * @param {import('../../types/dispatcher.d.ts').default.DispatchHandlers} handler
    * @param {boolean} allowErrorStatusCodes
    */
@@ -15986,7 +15733,7 @@ class CacheRevalidationHandler {
     // https://datatracker.ietf.org/doc/html/rfc5861#section-4
     this.#successful = statusCode === 304 ||
       (this.#allowErrorStatusCodes && statusCode >= 500 && statusCode <= 504)
-    this.#callback(this.#successful, this.#context, statusCode, headers)
+    this.#callback(this.#successful, this.#context)
     this.#callback = null
 
     if (this.#successful) {
@@ -16851,26 +16598,6 @@ function calculateRetryAfterHeader (retryAfter) {
   return isNaN(retryTime) ? 0 : retryTime - Date.now()
 }
 
-function validatePartialResponseContentLength (headers, range, statusCode, retryCount) {
-  const contentLength = headers['content-length']
-  if (contentLength == null) {
-    return
-  }
-
-  if (!Number.isFinite(range.start) || !Number.isFinite(range.end)) {
-    return
-  }
-
-  const length = Number(contentLength)
-  const expectedLength = range.end - range.start + 1
-  if (!Number.isFinite(length) || length !== expectedLength) {
-    throw new RequestRetryError('Content-Length mismatch', statusCode, {
-      headers,
-      data: { count: retryCount }
-    })
-  }
-}
-
 class RetryHandler {
   constructor (opts, { dispatch, handler }) {
     const { retryOptions, ...dispatchOpts } = opts
@@ -17085,8 +16812,6 @@ class RetryHandler {
         })
       }
 
-      validatePartialResponseContentLength(headers, contentRange, statusCode, this.retryCount)
-
       const { start, size, end = size ? size - 1 : null } = contentRange
 
       assert(this.start === start, 'content-range mismatch')
@@ -17110,8 +16835,6 @@ class RetryHandler {
           )
           return
         }
-
-        validatePartialResponseContentLength(headers, range, statusCode, this.retryCount)
 
         const { start, size, end = size ? size - 1 : null } = range
         assert(
@@ -17495,9 +17218,8 @@ const util = __nccwpck_require__(3440)
 const CacheHandler = __nccwpck_require__(9976)
 const MemoryCacheStore = __nccwpck_require__(4889)
 const CacheRevalidationHandler = __nccwpck_require__(7133)
-const { assertCacheStore, assertCacheMethods, makeCacheKey, normalizeHeaders, parseCacheControlHeader, isInvalidOrWildcardVaryHeader } = __nccwpck_require__(7659)
+const { assertCacheStore, assertCacheMethods, makeCacheKey, normalizeHeaders, parseCacheControlHeader } = __nccwpck_require__(7659)
 const { AbortError } = __nccwpck_require__(8707)
-const { parseHttpDate } = __nccwpck_require__(5453)
 
 /**
  * @param {(string | RegExp)[] | undefined} origins
@@ -17517,44 +17239,6 @@ function assertCacheOrigins (origins, name) {
 }
 
 const nop = () => {}
-
-function trimOWS (value) {
-  return value.replace(/^[\t ]+|[\t ]+$/g, '')
-}
-
-function arrayIncludes (array, value) {
-  for (let i = 0; i < array.length; i++) {
-    if (array[i] === value) {
-      return true
-    }
-  }
-
-  return false
-}
-
-function hasPragmaNoCache (headers) {
-  const pragma = headers?.pragma
-  if (!pragma) {
-    return false
-  }
-
-  const values = Array.isArray(pragma) ? pragma : [pragma]
-  for (let i = 0; i < values.length; i++) {
-    const value = values[i]
-    if (typeof value !== 'string') {
-      continue
-    }
-
-    const directives = value.split(',')
-    for (let j = 0; j < directives.length; j++) {
-      if (trimOWS(directives[j]).toLowerCase() === 'no-cache') {
-        return true
-      }
-    }
-  }
-
-  return false
-}
 
 /**
  * @typedef {(options: import('../../types/dispatcher.d.ts').default.DispatchOptions, handler: import('../../types/dispatcher.d.ts').default.DispatchHandler) => void} DispatchFn
@@ -17587,90 +17271,14 @@ function needsRevalidation (result, cacheControlDirectives, { headers = {} }) {
 
 /**
  * @param {import('../../types/cache-interceptor.d.ts').default.GetResult} result
- * @param {import('../../types/cache-interceptor.d.ts').default.CacheOptions['type']} cacheType
- * @returns {boolean}
- */
-function staleResponseRequiresRevalidation (result, cacheType) {
-  return result.cacheControlDirectives?.['must-revalidate'] === true ||
-    (cacheType === 'shared' && (
-      result.cacheControlDirectives?.['proxy-revalidate'] === true ||
-      // https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.10
-      // s-maxage implies proxy-revalidate for shared caches.
-      result.cacheControlDirectives?.['s-maxage'] !== undefined
-    ))
-}
-
-/**
- * @param {import('../../types/cache-interceptor.d.ts').default.CacheOptions['type']} cacheType
- * @param {import('../../types/header.d.ts').IncomingHttpHeaders} headers
- * @returns {boolean}
- */
-function revalidationResponseDisallowsCachedReuse (cacheType, headers) {
-  if (headers.vary && isInvalidOrWildcardVaryHeader(headers.vary)) {
-    return true
-  }
-
-  const cacheControl = headers['cache-control']
-  if (!cacheControl) {
-    return false
-  }
-
-  const cacheControlDirectives = parseCacheControlHeader(cacheControl)
-  return cacheControlDirectives['no-store'] === true ||
-    (cacheType === 'shared' && cacheControlDirectives.private === true)
-}
-
-function revalidationResponseUpdatesCacheControl (headers) {
-  return headers['cache-control'] !== undefined
-}
-
-function deleteCachedValue (store, cacheKey) {
-  try {
-    store.delete(cacheKey)?.catch?.(nop)
-  } catch {
-    // Fail silently
-  }
-}
-
-function getUsableLastModified (headers) {
-  const lastModified = headers?.['last-modified']
-  if (typeof lastModified === 'string' && parseHttpDate(lastModified)) {
-    return lastModified
-  }
-}
-
-function makeRevalidationHeaders (opts, result) {
-  const headers = {
-    ...opts.headers,
-    'if-modified-since': getUsableLastModified(result.headers) ?? new Date(result.cachedAt).toUTCString()
-  }
-
-  if (result.etag) {
-    headers['if-none-match'] = result.etag
-  }
-
-  if (result.vary) {
-    for (const key in result.vary) {
-      if (result.vary[key] != null) {
-        headers[key] = result.vary[key]
-      }
-    }
-  }
-
-  return headers
-}
-
-/**
- * @param {import('../../types/cache-interceptor.d.ts').default.GetResult} result
  * @param {import('../../types/cache-interceptor.d.ts').default.CacheControlDirectives | undefined} cacheControlDirectives
- * @param {import('../../types/cache-interceptor.d.ts').default.CacheOptions['type']} cacheType
  * @returns {boolean}
  */
-function isStale (result, cacheControlDirectives, cacheType) {
+function isStale (result, cacheControlDirectives) {
   const now = Date.now()
   if (now > result.staleAt) {
     // Response is stale
-    if (!staleResponseRequiresRevalidation(result, cacheType) && cacheControlDirectives?.['max-stale']) {
+    if (cacheControlDirectives?.['max-stale']) {
       // There's a threshold where we can serve stale responses, let's see if
       //  we're in it
       // https://www.rfc-editor.org/rfc/rfc9111.html#name-max-stale
@@ -17697,12 +17305,11 @@ function isStale (result, cacheControlDirectives, cacheType) {
 /**
  * Check if we're within the stale-while-revalidate window for a stale response
  * @param {import('../../types/cache-interceptor.d.ts').default.GetResult} result
- * @param {import('../../types/cache-interceptor.d.ts').default.CacheOptions['type']} cacheType
  * @returns {boolean}
  */
-function withinStaleWhileRevalidateWindow (result, cacheType) {
+function withinStaleWhileRevalidateWindow (result) {
   const staleWhileRevalidate = result.cacheControlDirectives?.['stale-while-revalidate']
-  if (!staleWhileRevalidate || staleResponseRequiresRevalidation(result, cacheType)) {
+  if (!staleWhileRevalidate) {
     return false
   }
 
@@ -17872,10 +17479,14 @@ function handleResult (
   }
 
   const age = Math.round((now - result.cachedAt) / 1000)
-  const requestMaxAgeExpired = reqCacheControl?.['max-age'] !== undefined && age >= reqCacheControl['max-age']
+  if (reqCacheControl?.['max-age'] && age >= reqCacheControl['max-age']) {
+    // Response is considered expired for this specific request
+    //  https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.1.1
+    return dispatch(opts, handler)
+  }
 
-  const stale = requestMaxAgeExpired || isStale(result, reqCacheControl, globalOpts.type)
-  const revalidate = requestMaxAgeExpired || needsRevalidation(result, reqCacheControl, opts)
+  const stale = isStale(result, reqCacheControl)
+  const revalidate = needsRevalidation(result, reqCacheControl, opts)
 
   // Check if the response is stale
   if (stale || revalidate) {
@@ -17887,13 +17498,28 @@ function handleResult (
 
     // RFC 5861: If we're within stale-while-revalidate window, serve stale immediately
     // and revalidate in background, unless immediate revalidation is necessary
-    if (!revalidate && withinStaleWhileRevalidateWindow(result, globalOpts.type)) {
+    if (!revalidate && withinStaleWhileRevalidateWindow(result)) {
       // Serve stale response immediately
       sendCachedValue(handler, opts, result, age, null, true)
 
       // Start background revalidation (fire-and-forget)
       queueMicrotask(() => {
-        const headers = makeRevalidationHeaders(opts, result)
+        const headers = {
+          ...opts.headers,
+          'if-modified-since': new Date(result.cachedAt).toUTCString()
+        }
+
+        if (result.etag) {
+          headers['if-none-match'] = result.etag
+        }
+
+        if (result.vary) {
+          for (const key in result.vary) {
+            if (result.vary[key] != null) {
+              headers[key] = result.vary[key]
+            }
+          }
+        }
 
         // Background revalidation - update cache if we get new data
         dispatch(
@@ -17917,14 +17543,27 @@ function handleResult (
     }
 
     let withinStaleIfErrorThreshold = false
-    if (!staleResponseRequiresRevalidation(result, globalOpts.type)) {
-      const staleIfErrorExpiry = result.cacheControlDirectives['stale-if-error'] ?? reqCacheControl?.['stale-if-error']
-      if (staleIfErrorExpiry) {
-        withinStaleIfErrorThreshold = now < (result.staleAt + (staleIfErrorExpiry * 1000))
-      }
+    const staleIfErrorExpiry = result.cacheControlDirectives['stale-if-error'] ?? reqCacheControl?.['stale-if-error']
+    if (staleIfErrorExpiry) {
+      withinStaleIfErrorThreshold = now < (result.staleAt + (staleIfErrorExpiry * 1000))
     }
 
-    const headers = makeRevalidationHeaders(opts, result)
+    const headers = {
+      ...opts.headers,
+      'if-modified-since': new Date(result.cachedAt).toUTCString()
+    }
+
+    if (result.etag) {
+      headers['if-none-match'] = result.etag
+    }
+
+    if (result.vary) {
+      for (const key in result.vary) {
+        if (result.vary[key] != null) {
+          headers[key] = result.vary[key]
+        }
+      }
+    }
 
     // We need to revalidate the response
     return dispatch(
@@ -17933,23 +17572,8 @@ function handleResult (
         headers
       },
       new CacheRevalidationHandler(
-        (success, context, statusCode, headers) => {
+        (success, context) => {
           if (success) {
-            if (statusCode === 304) {
-              if (revalidationResponseDisallowsCachedReuse(globalOpts.type, headers)) {
-                if (util.isStream(result.body)) {
-                  result.body.on('error', nop).destroy()
-                }
-
-                deleteCachedValue(globalOpts.store, cacheKey)
-                return dispatch(opts, new CacheHandler(globalOpts, cacheKey, handler))
-              }
-
-              if (revalidationResponseUpdatesCacheControl(headers)) {
-                deleteCachedValue(globalOpts.store, cacheKey)
-              }
-            }
-
             // TODO: successful revalidation should be considered fresh (not give stale warning).
             sendCachedValue(handler, opts, result, age, context, stale)
           } else if (util.isStream(result.body)) {
@@ -18006,17 +17630,11 @@ module.exports = (opts = {}) => {
     type
   }
 
-  const safeMethodsToNotCache = []
-  for (let i = 0; i < util.safeHTTPMethods.length; i++) {
-    const method = util.safeHTTPMethods[i]
-    if (!arrayIncludes(methods, method)) {
-      safeMethodsToNotCache.push(method)
-    }
-  }
+  const safeMethodsToNotCache = util.safeHTTPMethods.filter(method => methods.includes(method) === false)
 
   return dispatch => {
     return (opts, handler) => {
-      if (!opts.origin || arrayIncludes(safeMethodsToNotCache, opts.method)) {
+      if (!opts.origin || safeMethodsToNotCache.includes(opts.method)) {
         // Not a method we want to cache or we don't have the origin, skip
         return dispatch(opts, handler)
       }
@@ -18051,9 +17669,7 @@ module.exports = (opts = {}) => {
 
       const reqCacheControl = opts.headers?.['cache-control']
         ? parseCacheControlHeader(opts.headers['cache-control'])
-        : hasPragmaNoCache(opts.headers)
-          ? { 'no-cache': true }
-          : undefined
+        : undefined
 
       if (reqCacheControl?.['no-store']) {
         return dispatch(opts, handler)
@@ -22569,146 +22185,10 @@ module.exports = {
 const {
   safeHTTPMethods,
   pathHasQueryOrFragment,
-  hasSafeIterator,
-  isValidHTTPToken
+  hasSafeIterator
 } = __nccwpck_require__(3440)
 
 const { serializePathWithQuery } = __nccwpck_require__(3440)
-
-const MAX_DELTA_SECONDS = 2147483647
-const RESTRICTIVE_DIRECTIVE_NAMES = ['no-store', 'private', 'no-cache']
-const kInvalidCacheControlDirectives = Symbol('invalid cache-control directives')
-
-function trimOWS (value) {
-  return value.replace(/^[\t ]+|[\t ]+$/g, '')
-}
-
-function arrayIncludes (array, value) {
-  for (let i = 0; i < array.length; i++) {
-    if (array[i] === value) {
-      return true
-    }
-  }
-
-  return false
-}
-
-function trimOWSStart (value) {
-  return value.replace(/^[\t ]+/, '')
-}
-
-function trimOWSEnd (value) {
-  return value.replace(/[\t ]+$/, '')
-}
-
-function findUnescapedQuote (value, start) {
-  let escaped = false
-  for (let i = start; i < value.length; i++) {
-    if (escaped) {
-      escaped = false
-    } else if (value[i] === '\\') {
-      escaped = true
-    } else if (value[i] === '"') {
-      return i
-    }
-  }
-
-  return -1
-}
-
-function splitCacheControlHeaderValue (value) {
-  const directives = []
-  let start = 0
-  let quoteStart = -1
-  let inQuote = false
-  let escaped = false
-
-  for (let i = 0; i < value.length; i++) {
-    if (inQuote) {
-      if (escaped) {
-        escaped = false
-      } else if (value[i] === '\\') {
-        escaped = true
-      } else if (value[i] === '"') {
-        inQuote = false
-        quoteStart = -1
-      }
-    } else if (value[i] === '"') {
-      inQuote = true
-      quoteStart = i
-    } else if (value[i] === ',') {
-      directives.push({ value: value.substring(start, i), fromMalformedQuote: false })
-      start = i + 1
-    }
-  }
-
-  if (!inQuote) {
-    directives.push({ value: value.substring(start), fromMalformedQuote: false })
-    return directives
-  }
-
-  const tail = value.substring(start)
-  const quoteOffset = quoteStart - start
-  let tailStart = 0
-  for (let i = 0; i < tail.length; i++) {
-    if (tail[i] === ',') {
-      directives.push({
-        value: tail.substring(tailStart, i),
-        fromMalformedQuote: tailStart > quoteOffset
-      })
-      tailStart = i + 1
-    }
-  }
-
-  directives.push({
-    value: tail.substring(tailStart),
-    fromMalformedQuote: tailStart > quoteOffset
-  })
-  return directives
-}
-
-function markInvalidCacheControlDirective (directives, key) {
-  let invalidDirectives = directives[kInvalidCacheControlDirectives]
-
-  if (invalidDirectives === undefined) {
-    invalidDirectives = new Set()
-    Object.defineProperty(directives, kInvalidCacheControlDirectives, {
-      value: invalidDirectives
-    })
-  }
-
-  invalidDirectives.add(key)
-}
-
-function hasInvalidCacheControlDirective (directives, key) {
-  return directives[kInvalidCacheControlDirectives]?.has(key) === true
-}
-
-function getMalformedRestrictiveDirectiveName (key) {
-  for (const directiveName of RESTRICTIVE_DIRECTIVE_NAMES) {
-    if (
-      key.startsWith(directiveName) &&
-      key.length > directiveName.length &&
-      !isValidHTTPToken(key[directiveName.length])
-    ) {
-      return directiveName
-    }
-  }
-
-  let tokenOnlyKey = ''
-  let hasInvalidTokenChar = false
-  for (let i = 0; i < key.length; i++) {
-    if (isValidHTTPToken(key[i])) {
-      tokenOnlyKey += key[i]
-    } else {
-      hasInvalidTokenChar = true
-    }
-  }
-
-  if (hasInvalidTokenChar && arrayIncludes(RESTRICTIVE_DIRECTIVE_NAMES, tokenOnlyKey)) {
-    return tokenOnlyKey
-  }
-}
 
 /**
  * @param {import('../../types/dispatcher.d.ts').default.DispatchOptions} opts
@@ -22732,20 +22212,6 @@ function makeCacheKey (opts) {
   }
 }
 
-function appendHeader (headers, key, val) {
-  const headerName = key.toLowerCase()
-  const current = headers[headerName]
-  const values = Array.isArray(val) ? val : [val]
-
-  if (current === undefined) {
-    headers[headerName] = Array.isArray(val) ? val.slice() : val
-  } else if (Array.isArray(current)) {
-    current.push(...values)
-  } else {
-    headers[headerName] = [current, ...values]
-  }
-}
-
 /**
  * @param {Record<string, string[] | string>}
  * @returns {Record<string, string[] | string>}
@@ -22766,11 +22232,11 @@ function normalizeHeaders (opts) {
         if (typeof key !== 'string' || typeof val !== 'string') {
           throw new Error('opts.headers is not a valid header map')
         }
-        appendHeader(headers, key, val)
+        headers[key.toLowerCase()] = val
       }
     } else {
       for (const key of Object.keys(opts.headers)) {
-        appendHeader(headers, key, opts.headers[key])
+        headers[key.toLowerCase()] = opts.headers[key]
       }
     }
   } else {
@@ -22842,37 +22308,29 @@ function parseCacheControlHeader (header) {
    * @type {import('../../types/cache-interceptor.d.ts').default.CacheControlDirectives}
    */
   const output = {}
-  const invalidNumericDirectives = new Set()
-  const invalidNoArgumentDirectives = new Set()
 
-  const directives = splitCacheControlHeaderValue(Array.isArray(header) ? header.join(',') : header)
+  let directives
+  if (Array.isArray(header)) {
+    directives = []
+
+    for (const directive of header) {
+      directives.push(...directive.split(','))
+    }
+  } else {
+    directives = header.split(',')
+  }
 
   for (let i = 0; i < directives.length; i++) {
-    const directiveRecord = directives[i]
-    const directive = directiveRecord.value.toLowerCase()
-    const fromMalformedQuote = directiveRecord.fromMalformedQuote
+    const directive = directives[i].toLowerCase()
     const keyValueDelimiter = directive.indexOf('=')
 
     let key
     let value
-    let keyHasTrailingWhitespace = false
-    let valueHasLeadingWhitespace = false
     if (keyValueDelimiter !== -1) {
-      const rawKey = directive.substring(0, keyValueDelimiter)
-      const rawValue = directive.substring(keyValueDelimiter + 1)
-
-      keyHasTrailingWhitespace = trimOWSEnd(rawKey) !== rawKey
-      valueHasLeadingWhitespace = trimOWSStart(rawValue) !== rawValue
-      key = trimOWS(rawKey)
-      value = trimOWSStart(rawValue)
+      key = directive.substring(0, keyValueDelimiter).trimStart()
+      value = directive.substring(keyValueDelimiter + 1)
     } else {
-      key = trimOWS(directive)
-    }
-
-    const malformedRestrictiveDirectiveName = getMalformedRestrictiveDirectiveName(key)
-    if (malformedRestrictiveDirectiveName !== undefined) {
-      output[malformedRestrictiveDirectiveName] = true
-      continue
+      key = directive.trim()
     }
 
     switch (key) {
@@ -22882,14 +22340,7 @@ function parseCacheControlHeader (header) {
       case 's-maxage':
       case 'stale-while-revalidate':
       case 'stale-if-error': {
-        if (fromMalformedQuote || invalidNumericDirectives.has(key)) {
-          continue
-        }
-
-        if (value === undefined || keyHasTrailingWhitespace || valueHasLeadingWhitespace) {
-          delete output[key]
-          invalidNumericDirectives.add(key)
-          markInvalidCacheControlDirective(output, key)
+        if (value === undefined || value[0] === ' ') {
           continue
         }
 
@@ -22901,37 +22352,22 @@ function parseCacheControlHeader (header) {
           value = value.substring(1, value.length - 1)
         }
 
-        if (!/^[0-9]+$/.test(value)) {
-          delete output[key]
-          invalidNumericDirectives.add(key)
-          markInvalidCacheControlDirective(output, key)
+        const parsedValue = parseInt(value, 10)
+        // eslint-disable-next-line no-self-compare
+        if (parsedValue !== parsedValue) {
           continue
         }
 
-        const parsedValue = Math.min(parseInt(value, 10), MAX_DELTA_SECONDS)
-
-        if (key === 'min-fresh') {
-          if (!(key in output) || output[key] < parsedValue) {
-            output[key] = parsedValue
-          }
-        } else if (!(key in output) || output[key] > parsedValue) {
-          output[key] = parsedValue
+        if (key === 'max-age' && key in output && output[key] >= parsedValue) {
+          continue
         }
+
+        output[key] = parsedValue
 
         break
       }
       case 'private':
       case 'no-cache': {
-        if (fromMalformedQuote) {
-          output[key] = true
-          break
-        }
-
-        if (value !== undefined && value.length === 0) {
-          output[key] = true
-          break
-        }
-
         if (value) {
           // The private and no-cache directives can be unqualified (aka just
           //  `private` or `no-cache`) or qualified (w/ a value). When they're
@@ -22939,64 +22375,45 @@ function parseCacheControlHeader (header) {
           //  `no-cache="header1"`, or `no-cache="header1, header2"`
           // If we're given multiple headers, the comma messes us up since
           //  we split the full header by commas. So, let's loop through the
-          //  remaining parts in front of us until we find one that contains a
-          //  closing quote. We can then skip the consumed quoted-list fragments and
-          //  continue parsing like normal.
+          //  remaining parts in front of us until we find one that ends in a
+          //  quote. We can then just splice all of the parts in between the
+          //  starting quote and the ending quote out of the directives array
+          //  and continue parsing like normal.
           // https://www.rfc-editor.org/rfc/rfc9111.html#name-no-cache-2
           if (value[0] === '"') {
             // Something like `no-cache="some-header"` OR `no-cache="some-header, another-header"`.
-            value = trimOWSEnd(value)
 
-            let fieldList = ''
-            let lastQuotedPart = i
-            let foundEndingQuote = false
-            const closingQuote = findUnescapedQuote(value, 1)
+            // Add the first header on and cut off the leading quote
+            const headers = [value.substring(1)]
 
-            if (closingQuote !== -1) {
-              fieldList = value.substring(1, closingQuote)
-              foundEndingQuote = true
-            } else {
+            let foundEndingQuote = value[value.length - 1] === '"'
+            if (!foundEndingQuote) {
               // Something like `no-cache="some-header, another-header"`
               //  This can still be something invalid, e.g. `no-cache="some-header, ...`
-              const fieldListParts = [value.substring(1)]
-
               for (let j = i + 1; j < directives.length; j++) {
-                const nextPart = trimOWS(directives[j].value)
-                const closingQuote = findUnescapedQuote(nextPart, 0)
+                const nextPart = directives[j]
+                const nextPartLength = nextPart.length
 
-                lastQuotedPart = j
+                headers.push(nextPart.trim())
 
-                if (closingQuote !== -1) {
-                  fieldListParts.push(nextPart.substring(0, closingQuote))
+                if (nextPartLength !== 0 && nextPart[nextPartLength - 1] === '"') {
                   foundEndingQuote = true
                   break
                 }
-
-                fieldListParts.push(nextPart)
-              }
-
-              fieldList = fieldListParts.join(',')
-            }
-
-            if (!foundEndingQuote) {
-              output[key] = true
-              break
-            }
-
-            i = lastQuotedPart
-
-            const headers = fieldList.split(',')
-            let validFieldNames = true
-            for (let j = 0; j < headers.length; j++) {
-              headers[j] = trimOWS(headers[j])
-              if (!isValidHTTPToken(headers[j])) {
-                validFieldNames = false
               }
             }
 
-            if (!validFieldNames) {
-              output[key] = true
-            } else if (output[key] !== true) {
+            if (foundEndingQuote) {
+              let lastHeader = headers[headers.length - 1]
+              if (lastHeader[lastHeader.length - 1] === '"') {
+                lastHeader = lastHeader.substring(0, lastHeader.length - 1)
+                headers[headers.length - 1] = lastHeader
+              }
+
+              for (let j = 0; j < headers.length; j++) {
+                headers[j] = headers[j].trim()
+              }
+
               if (key in output) {
                 output[key] = output[key].concat(headers)
               } else {
@@ -23004,17 +22421,13 @@ function parseCacheControlHeader (header) {
               }
             }
           } else {
-            // Something like `no-cache=some-header`
-            const fieldName = trimOWS(value)
+            // Something like `no-cache="some-header"`
+            const fieldName = value.trim()
 
-            if (!isValidHTTPToken(fieldName)) {
-              output[key] = true
-            } else if (output[key] !== true) {
-              if (key in output) {
-                output[key] = output[key].concat(fieldName)
-              } else {
-                output[key] = [fieldName]
-              }
+            if (key in output) {
+              output[key] = output[key].concat(fieldName)
+            } else {
+              output[key] = [fieldName]
             }
           }
 
@@ -23023,27 +22436,19 @@ function parseCacheControlHeader (header) {
       }
       // eslint-disable-next-line no-fallthrough
       case 'public':
+      case 'no-store':
       case 'must-revalidate':
       case 'proxy-revalidate':
       case 'immutable':
       case 'no-transform':
       case 'must-understand':
       case 'only-if-cached':
-        if (fromMalformedQuote || invalidNoArgumentDirectives.has(key)) {
-          continue
-        }
-
-        if (value !== undefined) {
+        if (value) {
           // These are qualified (something like `public=...`) when they aren't
-          //  allowed to be, skip all instances of the malformed directive.
-          delete output[key]
-          invalidNoArgumentDirectives.add(key)
+          //  allowed to be, skip
           continue
         }
 
-        output[key] = true
-        break
-      case 'no-store':
         output[key] = true
         break
       default:
@@ -23057,75 +22462,27 @@ function parseCacheControlHeader (header) {
 
 /**
  * @param {string | string[]} varyHeader Vary header from the server
- * @returns {string[]}
- */
-function splitVaryHeader (varyHeader) {
-  const values = Array.isArray(varyHeader) ? varyHeader : [varyHeader]
-  const output = []
-
-  for (let i = 0; i < values.length; i++) {
-    const parts = values[i].split(',')
-    for (let j = 0; j < parts.length; j++) {
-      output.push(parts[j])
-    }
-  }
-
-  return output
-}
-
-/**
- * @param {string | string[]} varyHeader Vary header from the server
- * @returns {boolean}
- */
-function hasVaryStar (varyHeader) {
-  const values = splitVaryHeader(varyHeader)
-  for (let i = 0; i < values.length; i++) {
-    if (trimOWS(values[i]).indexOf('*') !== -1) {
-      return true
-    }
-  }
-
-  return false
-}
-
-/**
- * @param {string | string[]} varyHeader Vary header from the server
  * @param {Record<string, string | string[]>} headers Request headers
- * @returns {Record<string, string | string[] | null> | undefined}
+ * @returns {Record<string, string | string[]>}
  */
 function parseVaryHeader (varyHeader, headers) {
-  if (hasVaryStar(varyHeader)) {
+  if (typeof varyHeader === 'string' && varyHeader.includes('*')) {
     return headers
   }
 
   const output = /** @type {Record<string, string | string[] | null>} */ ({})
 
-  const varyingHeaders = splitVaryHeader(varyHeader)
+  const varyingHeaders = typeof varyHeader === 'string'
+    ? varyHeader.split(',')
+    : varyHeader
 
   for (const header of varyingHeaders) {
-    const trimmedHeader = trimOWS(header).toLowerCase()
+    const trimmedHeader = header.trim().toLowerCase()
 
-    if (trimmedHeader.length === 0) {
-      continue
-    }
-
-    if (!isValidHTTPToken(trimmedHeader)) {
-      return undefined
-    }
-
-    const headerValue = headers[trimmedHeader]
-    output[trimmedHeader] = Array.isArray(headerValue) ? headerValue.slice() : headerValue ?? null
+    output[trimmedHeader] = headers[trimmedHeader] ?? null
   }
 
   return output
-}
-
-/**
- * @param {string | string[]} varyHeader Vary header from the server
- * @returns {boolean}
- */
-function isInvalidOrWildcardVaryHeader (varyHeader) {
-  return hasVaryStar(varyHeader) || parseVaryHeader(varyHeader, {}) === undefined
 }
 
 /**
@@ -23191,7 +22548,7 @@ function assertCacheMethods (methods, name = 'CacheMethods') {
   }
 
   for (const method of methods) {
-    if (!arrayIncludes(safeHTTPMethods, method)) {
+    if (!safeHTTPMethods.includes(method)) {
       throw new TypeError(`element of ${name}-array needs to be one of following values: ${safeHTTPMethods.join(', ')}, got ${method}`)
     }
   }
@@ -23231,10 +22588,7 @@ module.exports = {
   assertCacheKey,
   assertCacheValue,
   parseCacheControlHeader,
-  hasInvalidCacheControlDirective,
   parseVaryHeader,
-  hasVaryStar,
-  isInvalidOrWildcardVaryHeader,
   isEtagUsable,
   assertCacheMethods,
   assertCacheStore,
@@ -23266,26 +22620,6 @@ function parseHttpDate (date) {
     case ' ': return parseAscTimeDate(date)
     default: return parseRfc850Date(date)
   }
-}
-
-function makeDate (year, monthIdx, day, hour, minute, second, weekday) {
-  const result = new Date(Date.UTC(year, monthIdx, day, hour, minute, second))
-
-  // Date.UTC treats years 0-99 as 1900-1999. Reset the full year so component
-  // checks below validate the HTTP date as written.
-  if (year >= 0 && year <= 99) {
-    result.setUTCFullYear(year)
-  }
-
-  return result.getUTCFullYear() === year &&
-    result.getUTCMonth() === monthIdx &&
-    result.getUTCDate() === day &&
-    result.getUTCHours() === hour &&
-    result.getUTCMinutes() === minute &&
-    result.getUTCSeconds() === second &&
-    result.getUTCDay() === weekday
-    ? result
-    : undefined
 }
 
 /**
@@ -23494,7 +22828,8 @@ function parseImfDate (date) {
     second = (code1 - 48) * 10 + (code2 - 48) // Convert ASCII codes to number
   }
 
-  return makeDate(year, monthIdx, day, hour, minute, second, weekday)
+  const result = new Date(Date.UTC(year, monthIdx, day, hour, minute, second))
+  return result.getUTCDay() === weekday ? result : undefined
 }
 
 /**
@@ -23698,7 +23033,8 @@ function parseAscTimeDate (date) {
   }
   const year = (yearDigit1 - 48) * 1000 + (yearDigit2 - 48) * 100 + (yearDigit3 - 48) * 10 + (yearDigit4 - 48)
 
-  return makeDate(year, monthIdx, day, hour, minute, second, weekday)
+  const result = new Date(Date.UTC(year, monthIdx, day, hour, minute, second))
+  return result.getUTCDay() === weekday ? result : undefined
 }
 
 /**
@@ -23912,7 +23248,8 @@ function parseRfc850Date (date) {
     second = (code1 - 48) * 10 + (code2 - 48) // Convert ASCII codes to number
   }
 
-  return makeDate(year, monthIdx, day, hour, minute, second, weekday)
+  const result = new Date(Date.UTC(year, monthIdx, day, hour, minute, second))
+  return result.getUTCDay() === weekday ? result : undefined
 }
 
 module.exports = {
@@ -26308,7 +25645,7 @@ function validateCookiePath (path) {
 
     if (
       code < 0x20 || // exclude CTLs (0-31)
-      code > 0x7E || // exclude DEL and non-ascii
+      code === 0x7F || // DEL
       code === 0x3B // ;
     ) {
       throw new Error('Invalid cookie path')
@@ -26317,80 +25654,16 @@ function validateCookiePath (path) {
 }
 
 /**
- * <let-dig> ::= <letter> | <digit>
- *
- * <letter> ::= any one of the 52 alphabetic characters A through Z in
- * upper case and a through z in lower case
- *
- * <digit> ::= any one of the ten digits 0 through 9r
- *
- * @see https://www.rfc-editor.org/rfc/rfc1034#section-3.5
- * @param {number} code
- */
-function isLetterOrDigit (code) {
-  return (
-    (code >= 0x30 && code <= 0x39) || // 0-9
-    (code >= 0x41 && code <= 0x5A) || // A-Z
-    (code >= 0x61 && code <= 0x7A) // a-z
-  )
-}
-
-/**
- * Validates a cookie domain against the "preferred name syntax".
- *
- * <domain>      ::= <subdomain> | " "
- * <subdomain>   ::= <label> | <subdomain> "." <label>
- * <label>       ::= <let-dig> [ [ <ldh-str> ] <let-dig> ]
- * <ldh-str>     ::= <let-dig-hyp> | <let-dig-hyp> <ldh-str>
- * <let-dig-hyp> ::= <let-dig> | "-"
- *
- * @see https://www.rfc-editor.org/rfc/rfc1034#section-3.5
- * @see https://www.rfc-editor.org/rfc/rfc1123#section-2.1
- * @see https://www.rfc-editor.org/rfc/rfc1035#section-2.3.4
+ * I have no idea why these values aren't allowed to be honest,
+ * but Deno tests these. - Khafra
  * @param {string} domain
  */
 function validateCookieDomain (domain) {
-  // <domain> ::= <subdomain> | " "
-  if (domain === ' ') {
-    return
-  }
-
-  if (domain.length > 255) {
-    throw new Error('Invalid cookie domain')
-  }
-
-  let labelLength = 0
-
-  for (let i = 0; i < domain.length; ++i) {
-    const code = domain.charCodeAt(i)
-
-    if (code === 0x2E) {
-      if (labelLength === 0) {
-        throw new Error('Invalid cookie domain')
-      }
-
-      if (domain.charCodeAt(i - 1) === 0x2D) { // "-"
-        throw new Error('Invalid cookie domain')
-      }
-
-      labelLength = 0
-      continue
-    }
-
-    if (labelLength === 0 && !isLetterOrDigit(code)) {
-      throw new Error('Invalid cookie domain')
-    }
-
-    if (!isLetterOrDigit(code) && code !== 0x2D) { // "-"
-      throw new Error('Invalid cookie domain')
-    }
-
-    if (++labelLength > 63) {
-      throw new Error('Invalid cookie domain')
-    }
-  }
-
-  if (labelLength === 0 || domain.charCodeAt(domain.length - 1) === 0x2D) { // "-"
+  if (
+    domain.startsWith('-') ||
+    domain.endsWith('.') ||
+    domain.endsWith('-')
+  ) {
     throw new Error('Invalid cookie domain')
   }
 }
@@ -26533,13 +25806,7 @@ function stringify (cookie) {
 
     const [key, ...value] = part.split('=')
 
-    const trimmedKey = key.trim()
-    const joinedValue = value.join('=')
-
-    validateCookieName(trimmedKey)
-    validateCookieValue(joinedValue)
-
-    out.push(`${trimmedKey}=${joinedValue}`)
+    out.push(`${key.trim()}=${value.join('=')}`)
   }
 
   return out.join('; ')
