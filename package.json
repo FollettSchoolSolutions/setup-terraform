@@ -3,14 +3,14 @@
   "version": "4.0.1",
   "description": "Setup Terraform CLI for GitHub Actions",
   "license": "MPL-2.0",
-  "publisher": "hashicorp",
+  "publisher": "FollettSchoolSolutions",
   "main": "index.js",
   "engines": {
     "node": ">=24.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/hashicorp/setup-terraform.git"
+    "url": "https://github.com/FollettSchoolSolutions/setup-terraform.git"
   },
   "scripts": {
     "test": "semistandard --env jest && jest --coverage",
@@ -19,7 +19,7 @@
     "format-check": "echo \"unimplemented for actions/reusable-workflows basic-validation\""
   },
   "keywords": [],
-  "author": "",
+  "author": "FollettSchoolSolutions",
   "dependencies": {
     "@actions/core": "^1.11.1",
     "@actions/exec": "^1.1.1",
