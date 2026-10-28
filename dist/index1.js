@@ -40889,11 +40889,14 @@ async function checkTerraform () {
       return;
     }
     core.setFailed('Terraform detected a difference (exit code 2).');
+    // setFailed forces exit code 1; propagate terraform's real code so callers see it in $?
+    process.exitCode = exitCode;
     return;
   }
 
   // A non-zero exitCode is considered an error
   core.setFailed(`Terraform exited with code ${exitCode}.`);
+  process.exitCode = exitCode;
 })();
 
 module.exports = __webpack_exports__;
