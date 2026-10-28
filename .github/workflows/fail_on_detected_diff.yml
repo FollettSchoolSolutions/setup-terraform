@@ -6,14 +6,45 @@ on: # rebuild any PRs and main branch changes
     branches:
       - main
       - detect_diff
-jobs:
 
-  exitcode:
-    name: 'Terraform Run Local Exitcode'
+# Each case runs `terraform plan` through the wrapper and checks both the step
+# result and the `exitcode` output against what is expected.
+#
+# Projects (under .github/workflows/data):
+#   nochange - committed state, plan is clean            (terraform exit 0)
+#   local    - no state, plan wants to create resources  (terraform exit 2 with -detailed-exitcode)
+#   error    - config references an undeclared resource  (terraform exit 1)
+#
+# plan_args: '' is a raw `terraform plan`; '-detailed-exitcode' is passed explicitly.
+# fail_on_detected_diff=true makes the wrapper inject -detailed-exitcode itself, so raw and
+# explicit runs are expected to behave the same. With false, a diff only fails when the
+# caller asks for -detailed-exitcode, and then the wrapper still swallows exit code 2.
+jobs:
+  plan:
+    name: "plan ${{ matrix.project }} [fail_on_diff=${{ matrix.fail_on_detected_diff }}] ${{ matrix.plan_args || 'raw' }}"
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `outcome` is the expected step outcome, `exitcode` the expected `exitcode` step output.
+        include:
+          # --- fail_on_detected_diff: true ---
+          - { project: nochange, fail_on_detected_diff: 'true', plan_args: '',                    outcome: success, exitcode: '0' }
+          - { project: nochange, fail_on_detected_diff: 'true', plan_args: '-detailed-exitcode', outcome: success, exitcode: '0' }
+          - { project: local,    fail_on_detected_diff: 'true', plan_args: '',                    outcome: failure, exitcode: '2' }
+          - { project: local,    fail_on_detected_diff: 'true', plan_args: '-detailed-exitcode', outcome: failure, exitcode: '2' }
+          - { project: error,    fail_on_detected_diff: 'true', plan_args: '',                    outcome: failure, exitcode: '1' }
+          - { project: error,    fail_on_detected_diff: 'true', plan_args: '-detailed-exitcode', outcome: failure, exitcode: '1' }
+          # --- fail_on_detected_diff: false ---
+          - { project: nochange, fail_on_detected_diff: 'false', plan_args: '',                    outcome: success, exitcode: '0' }
+          - { project: nochange, fail_on_detected_diff: 'false', plan_args: '-detailed-exitcode', outcome: success, exitcode: '0' }
+          - { project: local,    fail_on_detected_diff: 'false', plan_args: '',                    outcome: success, exitcode: '0' }
+          - { project: local,    fail_on_detected_diff: 'false', plan_args: '-detailed-exitcode', outcome: success, exitcode: '2' }
+          - { project: error,    fail_on_detected_diff: 'false', plan_args: '',                    outcome: failure, exitcode: '1' }
+          - { project: error,    fail_on_detected_diff: 'false', plan_args: '-detailed-exitcode', outcome: failure, exitcode: '1' }
     defaults:
       run:
-        working-directory: ./.github/workflows/data/local
+        working-directory: ./.github/workflows/data/${{ matrix.project }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -21,37 +52,28 @@ jobs:
       - name: Setup Terraform
         uses: ./
         with:
-          fail_on_detected_diff: 'true'
+          fail_on_detected_diff: ${{ matrix.fail_on_detected_diff }}
 
       - name: Terraform Init
+        # `error` fails at validation during plan; init itself still succeeds.
         shell: bash
         run: terraform init
 
-#      - name: Terraform Format
-#        shell: bash
-#        run: terraform fmt -check
-#
-      - name: Terraform Plan 1
+      - name: Terraform Plan
         id: plan
+        continue-on-error: true # the failure is the expected result for some cases
         shell: bash
-        run: | 
-          terraform plan
+        run: terraform plan ${{ matrix.plan_args }}
 
-      - name: Print Terraform Plan 1 Output
-        if: always() # even if previous step failed, we want to capture the exit code
+      - name: Verify result
         shell: bash
+        env:
+          ACTUAL_OUTCOME: ${{ steps.plan.outcome }}
+          ACTUAL_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          EXPECTED_OUTCOME: ${{ matrix.outcome }}
+          EXPECTED_EXITCODE: ${{ matrix.exitcode }}
         run: |
-          echo "exit_code=${{ steps.plan.outputs.exitcode }}"
-
-      - name: Terraform Plan 2 (fail)
-        if: always() # even if previous step failed, we want to capture the exit code
-        id: plan_fail
-        shell: bash
-        run: | 
-          terraform plan -detailed-exitcode
-
-      - name: Print Terraform Plan 2 Output
-        if: always() # even if previous step failed, we want to capture the exit code
-        shell: bash
-        run: | 
-          echo "exit_code=${{ steps.plan_fail.outputs.exitcode }}"
+          echo "outcome:  actual=${ACTUAL_OUTCOME} expected=${EXPECTED_OUTCOME}"
+          echo "exitcode: actual=${ACTUAL_EXITCODE} expected=${EXPECTED_EXITCODE}"
+          test "${ACTUAL_OUTCOME}" = "${EXPECTED_OUTCOME}"
+          test "${ACTUAL_EXITCODE}" = "${EXPECTED_EXITCODE}"
